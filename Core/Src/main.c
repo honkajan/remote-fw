@@ -95,23 +95,37 @@ static int32_t ntc_adc_to_mC(uint16_t adc_counts)
   return mC;
 }
 
-static int adc_read_two(uint16_t *out0, uint16_t *out1)
+static int adc_read_one(ADC_HandleTypeDef *hadc, uint32_t channel, uint16_t *out)
 {
-  if (!out0 || !out1) return -1;
+  ADC_ChannelConfTypeDef sConfig = {0};
 
-  if (HAL_ADC_Start(&hadc1) != HAL_OK) return -2;
+  sConfig.Channel = channel;
+  sConfig.Rank = ADC_REGULAR_RANK_1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_239CYCLES_5;
 
-  // Conversion 1 (rank 1: IN0 / PA0)
-  if (HAL_ADC_PollForConversion(&hadc1, 50) != HAL_OK) return -3;
-  *out0 = (uint16_t)HAL_ADC_GetValue(&hadc1);
+  if (HAL_ADC_ConfigChannel(hadc, &sConfig) != HAL_OK) return -1;
+  if (HAL_ADC_Start(hadc) != HAL_OK) return -2;
+  if (HAL_ADC_PollForConversion(hadc, 50) != HAL_OK) return -3;
 
-  // Conversion 2 (rank 2: IN1 / PA1)
-  if (HAL_ADC_PollForConversion(&hadc1, 50) != HAL_OK) return -4;
-  *out1 = (uint16_t)HAL_ADC_GetValue(&hadc1);
+  *out = (uint16_t)HAL_ADC_GetValue(hadc);
 
-  (void)HAL_ADC_Stop(&hadc1);
+  (void)HAL_ADC_Stop(hadc);
   return 0;
 }
+
+static int adc_read_two(uint16_t *out0, uint16_t *out1)
+{
+  int rc;
+
+  rc = adc_read_one(&hadc1, ADC_CHANNEL_0, out0); // PA0
+  if (rc) return rc;
+
+  rc = adc_read_one(&hadc1, ADC_CHANNEL_1, out1); // PA1
+  if (rc) return rc;
+
+  return 0;
+}
+
 
 static void uart_printf(const char *fmt, ...)
 {
@@ -259,12 +273,12 @@ static void MX_ADC1_Init(void)
   /** Common config
   */
   hadc1.Instance = ADC1;
-  hadc1.Init.ScanConvMode = ADC_SCAN_ENABLE;
+  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
   hadc1.Init.ContinuousConvMode = DISABLE;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.NbrOfConversion = 2;
+  hadc1.Init.NbrOfConversion = 1;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
   {
     Error_Handler();
@@ -275,15 +289,6 @@ static void MX_ADC1_Init(void)
   sConfig.Channel = ADC_CHANNEL_0;
   sConfig.Rank = ADC_REGULAR_RANK_1;
   sConfig.SamplingTime = ADC_SAMPLETIME_239CYCLES_5;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure Regular Channel
-  */
-  sConfig.Channel = ADC_CHANNEL_1;
-  sConfig.Rank = ADC_REGULAR_RANK_2;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
