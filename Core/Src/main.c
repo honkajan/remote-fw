@@ -21,6 +21,11 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdarg.h>
+
 
 /* USER CODE END Includes */
 
@@ -31,6 +36,13 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+// --- NTC parameters ---
+#define ADC_MAX_COUNTS   4095.0f     // 12-bit ADC
+#define VREF_VOLTS       3.3f        // assuming VDDA ~ 3.3V
+#define RFIX_OHMS        10000.0f     // 10k fixed resistor to 3.3V
+#define R0_OHMS          10000.0f     // NTC nominal at 25C
+#define T0_KELVIN        298.15f      // 25C in Kelvin
+#define BETA_K           3950.0f
 
 /* USER CODE END PD */
 
@@ -59,6 +71,61 @@ static void MX_USART1_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static int32_t ntc_adc_to_mC(uint16_t adc_counts)
+{
+  // Convert ADC counts -> voltage at divider midpoint
+  float v = ( (float)adc_counts / ADC_MAX_COUNTS ) * VREF_VOLTS;
+
+  // Guard against impossible / saturating values
+  if (v <= 0.001f)  return -273150;  // effectively "invalid very cold"
+  if (v >= (VREF_VOLTS - 0.001f)) return 999999; // effectively "invalid very hot"
+
+  // Divider: V = Vref * (Rntc / (Rfix + Rntc))
+  // => Rntc = Rfix * V / (Vref - V)
+  float r_ntc = RFIX_OHMS * v / (VREF_VOLTS - v);
+
+  // Beta formula:
+  // 1/T = 1/T0 + (1/B) * ln(R/R0)
+  float invT = (1.0f / T0_KELVIN) + (1.0f / BETA_K) * logf(r_ntc / R0_OHMS);
+  float tempK = 1.0f / invT;
+  float tempC = tempK - 273.15f;
+
+  // milli-Celsius
+  int32_t mC = (int32_t)lroundf(tempC * 1000.0f);
+  return mC;
+}
+
+static int adc_read_two(uint16_t *out0, uint16_t *out1)
+{
+  if (!out0 || !out1) return -1;
+
+  if (HAL_ADC_Start(&hadc1) != HAL_OK) return -2;
+
+  // Conversion 1 (rank 1: IN0 / PA0)
+  if (HAL_ADC_PollForConversion(&hadc1, 50) != HAL_OK) return -3;
+  *out0 = (uint16_t)HAL_ADC_GetValue(&hadc1);
+
+  // Conversion 2 (rank 2: IN1 / PA1)
+  if (HAL_ADC_PollForConversion(&hadc1, 50) != HAL_OK) return -4;
+  *out1 = (uint16_t)HAL_ADC_GetValue(&hadc1);
+
+  (void)HAL_ADC_Stop(&hadc1);
+  return 0;
+}
+
+static void uart_printf(const char *fmt, ...)
+{
+  char buf[128];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+
+  if (n < 0) return;
+  if (n > (int)sizeof(buf)) n = sizeof(buf);
+
+  HAL_UART_Transmit(&huart1, (uint8_t*)buf, (uint16_t)strlen(buf), HAL_MAX_DELAY);
+}
 
 /* USER CODE END 0 */
 
@@ -94,6 +161,8 @@ int main(void)
   MX_ADC1_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
+  // ADC calibration (STM32F1)
+  (void)HAL_ADCEx_Calibration_Start(&hadc1);
 
   /* USER CODE END 2 */
 
@@ -101,6 +170,22 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	uint16_t a0 = 0, a1 = 0;
+	int rc = adc_read_two(&a0, &a1);
+
+	if (rc == 0) {
+	  int32_t t0_mC = ntc_adc_to_mC(a0);
+	  int32_t t1_mC = ntc_adc_to_mC(a1);
+
+	  uart_printf("ADC0=%u ADC1=%u  T0=%ld mC  T1=%ld mC\r\n",
+				  (unsigned)a0, (unsigned)a1,
+				  (long)t0_mC, (long)t1_mC);
+	} else {
+	  uart_printf("ADC read error rc=%d\r\n", rc);
+	}
+
+	HAL_Delay(1000);
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
