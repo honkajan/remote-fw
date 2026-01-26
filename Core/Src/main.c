@@ -44,6 +44,13 @@
 #define T0_KELVIN        298.15f      // 25C in Kelvin
 #define BETA_K           3950.0f
 
+// --- One-point calibration offsets (milli-°C) ---
+// Reference: 37.100 °C
+// Measured averages: CH0=36.64 °C, CH1=36.89 °C
+#define CAL_OFFS_CH0_mC  (460)   // +0.46 °C
+#define CAL_OFFS_CH1_mC  (210)   // +0.21 °C
+
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -190,6 +197,11 @@ int main(void)
 	if (rc == 0) {
 	  int32_t t0_mC = ntc_adc_to_mC(a0);
 	  int32_t t1_mC = ntc_adc_to_mC(a1);
+
+	  // Apply one-point calibration offset (skip if conversion returned "invalid")
+	  if (t0_mC > -200000 && t0_mC < 200000) t0_mC += CAL_OFFS_CH0_mC;
+	  if (t1_mC > -200000 && t1_mC < 200000) t1_mC += CAL_OFFS_CH1_mC;
+
 
 	  uart_printf("ADC0=%u ADC1=%u  T0=%ld mC  T1=%ld mC\r\n",
 				  (unsigned)a0, (unsigned)a1,
