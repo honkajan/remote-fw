@@ -51,6 +51,31 @@
 #define CAL_OFFS_CH1_mC  (210)   // +0.21 °C
 
 
+#define NRF_CE_PORT   GPIOB
+#define NRF_CE_PIN    GPIO_PIN_0
+#define NRF_CSN_PORT  GPIOB
+#define NRF_CSN_PIN   GPIO_PIN_1
+
+static inline void nrf_ce(int on)
+{
+  HAL_GPIO_WritePin(NRF_CE_PORT, NRF_CE_PIN, on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+static inline void nrf_csn(int on)
+{
+  HAL_GPIO_WritePin(NRF_CSN_PORT, NRF_CSN_PIN, on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+#define NRF_CMD_R_REGISTER    0x00
+#define NRF_CMD_W_REGISTER    0x20
+#define NRF_CMD_NOP           0xFF
+
+#define NRF_REG_CONFIG        0x00
+#define NRF_REG_RF_CH         0x05
+#define NRF_REG_RF_SETUP      0x06
+#define NRF_REG_STATUS        0x07
+
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -60,6 +85,8 @@
 
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
+
+SPI_HandleTypeDef hspi1;
 
 UART_HandleTypeDef huart1;
 
@@ -72,6 +99,7 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_SPI1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -148,6 +176,54 @@ static void uart_printf(const char *fmt, ...)
   HAL_UART_Transmit(&huart1, (uint8_t*)buf, (uint16_t)strlen(buf), HAL_MAX_DELAY);
 }
 
+static uint8_t nrf_spi_xfer(uint8_t b)
+{
+  uint8_t rx = 0;
+  HAL_SPI_TransmitReceive(&hspi1, &b, &rx, 1, HAL_MAX_DELAY);
+  return rx;
+}
+
+static uint8_t nrf_read_reg(uint8_t reg)
+{
+  uint8_t v;
+  nrf_csn(0);
+  nrf_spi_xfer(NRF_CMD_R_REGISTER | (reg & 0x1F));
+  v = nrf_spi_xfer(NRF_CMD_NOP);
+  nrf_csn(1);
+  return v;
+}
+
+static void nrf_write_reg(uint8_t reg, uint8_t v)
+{
+  nrf_csn(0);
+  nrf_spi_xfer(NRF_CMD_W_REGISTER | (reg & 0x1F));
+  nrf_spi_xfer(v);
+  nrf_csn(1);
+}
+
+static void nrf_init_basic(void)
+{
+  nrf_ce(0);
+  nrf_csn(1);
+  HAL_Delay(5);
+
+  // Example: set channel
+  nrf_write_reg(NRF_REG_RF_CH, 76);
+
+  // RF_SETUP: data rate / power.
+  // We'll keep something conservative here first. (Exact bits depend on nRF24L01+)
+  // 0x06 is a common "1Mbps, 0dBm" baseline; we'll refine later.
+  nrf_write_reg(NRF_REG_RF_SETUP, 0x06);
+
+  // CONFIG: PWR_UP=1 (bit1), PRIM_RX=1 (bit0) => RX mode
+  // plus CRC enabled.
+  nrf_write_reg(NRF_REG_CONFIG, 0x0F);
+
+  HAL_Delay(2);   // nRF needs ~1.5ms after PWR_UP
+  nrf_ce(1);      // start listening (PRX mode)
+}
+
+
 /* USER CODE END 0 */
 
 /**
@@ -181,9 +257,35 @@ int main(void)
   MX_GPIO_Init();
   MX_ADC1_Init();
   MX_USART1_UART_Init();
+  MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
   // ADC calibration (STM32F1)
   (void)HAL_ADCEx_Calibration_Start(&hadc1);
+
+  nrf_ce(0);
+  nrf_csn(1);
+  HAL_Delay(10);
+
+  uint8_t st = nrf_read_reg(NRF_REG_STATUS);
+  uint8_t cfg = nrf_read_reg(NRF_REG_CONFIG);
+
+  uart_printf("NRF STATUS=0x%02X CONFIG=0x%02X\r\n", st, cfg);
+
+  uint8_t ch0 = nrf_read_reg(NRF_REG_RF_CH);
+  uart_printf("RF_CH before = %u\r\n", ch0);
+
+  nrf_write_reg(NRF_REG_RF_CH, 76); // channel 76 (2.476 GHz)
+  uint8_t ch1 = nrf_read_reg(NRF_REG_RF_CH);
+  uart_printf("RF_CH after  = %u\r\n", ch1);
+
+
+  nrf_init_basic();
+  uart_printf("After init: CONFIG=0x%02X RF_CH=%u RF_SETUP=0x%02X\r\n",
+              nrf_read_reg(NRF_REG_CONFIG),
+              nrf_read_reg(NRF_REG_RF_CH),
+              nrf_read_reg(NRF_REG_RF_SETUP));
+
+
 
   /* USER CODE END 2 */
 
@@ -312,6 +414,44 @@ static void MX_ADC1_Init(void)
 }
 
 /**
+  * @brief SPI1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_SPI1_Init(void)
+{
+
+  /* USER CODE BEGIN SPI1_Init 0 */
+
+  /* USER CODE END SPI1_Init 0 */
+
+  /* USER CODE BEGIN SPI1_Init 1 */
+
+  /* USER CODE END SPI1_Init 1 */
+  /* SPI1 parameter configuration*/
+  hspi1.Instance = SPI1;
+  hspi1.Init.Mode = SPI_MODE_MASTER;
+  hspi1.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi1.Init.NSS = SPI_NSS_SOFT;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_32;
+  hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi1.Init.CRCPolynomial = 10;
+  if (HAL_SPI_Init(&hspi1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN SPI1_Init 2 */
+
+  /* USER CODE END SPI1_Init 2 */
+
+}
+
+/**
   * @brief USART1 Initialization Function
   * @param None
   * @retval None
@@ -351,6 +491,7 @@ static void MX_USART1_UART_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
@@ -358,6 +499,20 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_SET);
+
+  /*Configure GPIO pins : PB0 PB1 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
