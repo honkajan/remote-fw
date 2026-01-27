@@ -50,7 +50,7 @@
 #define CAL_OFFS_CH0_mC  (460)   // +0.46 °C
 #define CAL_OFFS_CH1_mC  (210)   // +0.21 °C
 
-
+// Pins
 #define NRF_CE_PORT   GPIOB
 #define NRF_CE_PIN    GPIO_PIN_0
 #define NRF_CSN_PORT  GPIOB
@@ -66,17 +66,27 @@ static inline void nrf_csn(int on)
   HAL_GPIO_WritePin(NRF_CSN_PORT, NRF_CSN_PIN, on ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
 
-#define NRF_CMD_R_REGISTER    0x00
-#define NRF_CMD_W_REGISTER    0x20
-#define NRF_CMD_NOP           0xFF
+// Commands + regs
+#define NRF_CMD_R_REGISTER     0x00
+#define NRF_CMD_W_REGISTER     0x20
+#define NRF_CMD_R_RX_PAYLOAD   0x61
+#define NRF_CMD_W_TX_PAYLOAD   0xA0
+#define NRF_CMD_FLUSH_TX       0xE1
+#define NRF_CMD_FLUSH_RX       0xE2
+#define NRF_CMD_NOP            0xFF
 
-#define NRF_REG_CONFIG        0x00
-#define NRF_REG_RF_CH         0x05
-#define NRF_REG_RF_SETUP      0x06
-#define NRF_REG_STATUS        0x07
+#define NRF_REG_CONFIG         0x00
+#define NRF_REG_EN_AA          0x01
+#define NRF_REG_EN_RXADDR      0x02
+#define NRF_REG_SETUP_RETR     0x04
+#define NRF_REG_RF_CH          0x05
+#define NRF_REG_RF_SETUP       0x06
+#define NRF_REG_STATUS         0x07
+#define NRF_REG_RX_ADDR_P0     0x0A
+#define NRF_REG_TX_ADDR        0x10
+#define NRF_REG_RX_PW_P0       0x11
+#define NRF_REG_FIFO_STATUS    0x17
 
-#define NRF_CMD_FLUSH_TX 0xE1
-#define NRF_CMD_FLUSH_RX 0xE2
 
 
 /* USER CODE END PD */
@@ -179,11 +189,22 @@ static void uart_printf(const char *fmt, ...)
   HAL_UART_Transmit(&huart1, (uint8_t*)buf, (uint16_t)strlen(buf), HAL_MAX_DELAY);
 }
 
+// SPI xfer
 static uint8_t nrf_spi_xfer(uint8_t b)
 {
   uint8_t rx = 0;
   HAL_SPI_TransmitReceive(&hspi1, &b, &rx, 1, HAL_MAX_DELAY);
   return rx;
+}
+
+// Register IO
+static uint8_t nrf_get_status_cmd(void)
+{
+  uint8_t st;
+  nrf_csn(0);
+  st = nrf_spi_xfer(NRF_CMD_NOP);
+  nrf_csn(1);
+  return st;
 }
 
 static uint8_t nrf_read_reg(uint8_t reg)
@@ -204,56 +225,161 @@ static void nrf_write_reg(uint8_t reg, uint8_t v)
   nrf_csn(1);
 }
 
-static void nrf_init_basic(void)
+static void nrf_write_reg_buf(uint8_t reg, const uint8_t *buf, uint8_t len)
 {
-  nrf_ce(0);
+  nrf_csn(0);
+  nrf_spi_xfer(NRF_CMD_W_REGISTER | (reg & 0x1F));
+  for (uint8_t i = 0; i < len; i++) nrf_spi_xfer(buf[i]);
   nrf_csn(1);
-  HAL_Delay(5);
-
-  // Example: set channel
-  nrf_write_reg(NRF_REG_RF_CH, 76);
-
-  // RF_SETUP: data rate / power.
-  // We'll keep something conservative here first. (Exact bits depend on nRF24L01+)
-  // 0x06 is a common "1Mbps, 0dBm" baseline; we'll refine later.
-  nrf_write_reg(NRF_REG_RF_SETUP, 0x06);
-
-  // CONFIG: PWR_UP=1 (bit1), PRIM_RX=1 (bit0) => RX mode
-  // plus CRC enabled.
-  nrf_write_reg(NRF_REG_CONFIG, 0x0F);
-
-  HAL_Delay(2);   // nRF needs ~1.5ms after PWR_UP
-  nrf_ce(1);      // start listening (PRX mode)
 }
 
-static uint8_t nrf_get_status_cmd(void)
+// FIFO flush + IRQ clear
+static void nrf_flush_rx(void)
 {
-  uint8_t st;
-  nrf_csn(0);
-  st = nrf_spi_xfer(NRF_CMD_NOP);   // returns STATUS byte
-  nrf_csn(1);
-  return st;
+  nrf_csn(0); nrf_spi_xfer(NRF_CMD_FLUSH_RX); nrf_csn(1);
 }
 
 static void nrf_flush_tx(void)
 {
-  nrf_csn(0);
-  nrf_spi_xfer(NRF_CMD_FLUSH_TX);
-  nrf_csn(1);
-}
-
-static void nrf_flush_rx(void)
-{
-  nrf_csn(0);
-  nrf_spi_xfer(NRF_CMD_FLUSH_RX);
-  nrf_csn(1);
+  nrf_csn(0); nrf_spi_xfer(NRF_CMD_FLUSH_TX); nrf_csn(1);
 }
 
 static void nrf_clear_irqs(void)
 {
-  // STATUS bits: RX_DR (6), TX_DS (5), MAX_RT (4) are cleared by writing 1
+  // Clear RX_DR(6), TX_DS(5), MAX_RT(4)
   nrf_write_reg(NRF_REG_STATUS, 0x70);
 }
+
+// Payload IO
+static int nrf_rx_available(void)
+{
+  uint8_t fifo = nrf_read_reg(NRF_REG_FIFO_STATUS);
+  return ((fifo & 0x01u) == 0u); // RX_EMPTY bit0 == 0 => data available
+}
+
+static void nrf_read_payload32(uint8_t *p32)
+{
+  nrf_csn(0);
+  nrf_spi_xfer(NRF_CMD_R_RX_PAYLOAD);
+  for (int i = 0; i < 32; i++) p32[i] = nrf_spi_xfer(NRF_CMD_NOP);
+  nrf_csn(1);
+}
+
+static void nrf_write_payload32(const uint8_t *p32)
+{
+  nrf_csn(0);
+  nrf_spi_xfer(NRF_CMD_W_TX_PAYLOAD);
+  for (int i = 0; i < 32; i++) nrf_spi_xfer(p32[i]);
+  nrf_csn(1);
+}
+
+
+// Mode switching
+static void nrf_set_rx_mode(void)
+{
+  nrf_ce(0);
+  nrf_write_reg(NRF_REG_CONFIG, 0x0F); // PWR_UP=1, PRIM_RX=1, CRC enabled
+  HAL_Delay(2);
+  nrf_ce(1);
+}
+
+static void nrf_set_tx_mode(void)
+{
+  nrf_ce(0);
+  nrf_write_reg(NRF_REG_CONFIG, 0x0E); // PWR_UP=1, PRIM_RX=0, CRC enabled
+  HAL_Delay(2);
+}
+
+
+// Common link init (call on both nodes)
+static void nrf_init_link_common(void)
+{
+  static const uint8_t addr[5] = {0xE7,0xE7,0xE7,0xE7,0xE7};
+
+  // Electrical idle + settle
+  nrf_ce(0);
+  nrf_csn(1);
+  HAL_Delay(10);
+
+  // Your “sync kick” (good!)
+  nrf_flush_rx();
+  nrf_flush_tx();
+  nrf_clear_irqs();
+
+  // Channel
+  nrf_write_reg(NRF_REG_RF_CH, 76);
+
+  // Auto-ack on pipe0
+  nrf_write_reg(NRF_REG_EN_AA, 0x01);
+  // Enable pipe0
+  nrf_write_reg(NRF_REG_EN_RXADDR, 0x01);
+
+  // Retries: ARD=4 (1500us), ARC=15
+  nrf_write_reg(NRF_REG_SETUP_RETR, 0x4F);
+
+  // RF_SETUP: 1Mbps, max power (bits differ by module; this is common baseline)
+  // For plain nRF24L01+: 0x06 = 1Mbps, 0dBm. We’ll start with 0x06 since you already use it.
+  nrf_write_reg(NRF_REG_RF_SETUP, 0x06);
+
+  // Addresses for pipe0 and TX (must match for auto-ack)
+  nrf_write_reg_buf(NRF_REG_RX_ADDR_P0, addr, 5);
+  nrf_write_reg_buf(NRF_REG_TX_ADDR, addr, 5);
+
+  // Fixed payload size
+  nrf_write_reg(NRF_REG_RX_PW_P0, 32);
+
+  nrf_flush_rx();
+  nrf_flush_tx();
+  nrf_clear_irqs();
+
+  // Start in RX mode
+  nrf_set_rx_mode();
+}
+
+
+// Bathroom node logic: RX and reply “PONG”
+static void remote_loop_pingpong(void)
+{
+  if (!nrf_rx_available()) return;
+
+  uint8_t rx[32];
+  nrf_read_payload32(rx);
+  nrf_clear_irqs();
+
+  // Simple signature check
+  if (rx[0]=='P' && rx[1]=='I' && rx[2]=='N' && rx[3]=='G') {
+    uint8_t tx[32] = {0};
+    tx[0]='P'; tx[1]='O'; tx[2]='N'; tx[3]='G';
+
+    // Send reply
+    nrf_set_tx_mode();
+    nrf_clear_irqs();
+    nrf_flush_tx();
+    nrf_write_payload32(tx);
+
+    nrf_ce(1);
+    HAL_Delay(1);
+    nrf_ce(0);
+
+    // Wait a bit for TX complete, then back to RX
+    uint32_t start = HAL_GetTick();
+    while ((HAL_GetTick() - start) < 50) {
+      uint8_t st = nrf_get_status_cmd();
+      if (st & (1u<<5)) { // TX_DS
+        nrf_clear_irqs();
+        break;
+      }
+      if (st & (1u<<4)) { // MAX_RT
+        nrf_clear_irqs();
+        nrf_flush_tx();
+        break;
+      }
+    }
+    nrf_set_rx_mode();
+  }
+}
+
+
 
 
 
@@ -295,34 +421,9 @@ int main(void)
   // ADC calibration (STM32F1)
   (void)HAL_ADCEx_Calibration_Start(&hadc1);
 
-  nrf_ce(0);
-  nrf_csn(1);
-  HAL_Delay(10);
 
-  nrf_flush_rx();
-  nrf_flush_tx();
-  nrf_clear_irqs();
-
-  uint8_t st = nrf_read_reg(NRF_REG_STATUS);
-  uint8_t cfg = nrf_read_reg(NRF_REG_CONFIG);
-
-  uart_printf("NRF STATUS=0x%02X CONFIG=0x%02X\r\n", st, cfg);
-
-  uint8_t ch0 = nrf_read_reg(NRF_REG_RF_CH);
-  uart_printf("RF_CH before = %u\r\n", ch0);
-
-  nrf_write_reg(NRF_REG_RF_CH, 76); // channel 76 (2.476 GHz)
-  uint8_t ch1 = nrf_read_reg(NRF_REG_RF_CH);
-  uart_printf("RF_CH after  = %u\r\n", ch1);
-
-
-  nrf_init_basic();
-  uart_printf("After init: CONFIG=0x%02X RF_CH=%u RF_SETUP=0x%02X\r\n",
-              nrf_read_reg(NRF_REG_CONFIG),
-              nrf_read_reg(NRF_REG_RF_CH),
-              nrf_read_reg(NRF_REG_RF_SETUP));
-
-
+  nrf_init_link_common();
+  uart_printf("Remote NRF STATUS=0x%02X\r\n", nrf_get_status_cmd());
 
   /* USER CODE END 2 */
 
@@ -330,26 +431,29 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	uint16_t a0 = 0, a1 = 0;
-	int rc = adc_read_two(&a0, &a1);
 
-	if (rc == 0) {
-	  int32_t t0_mC = ntc_adc_to_mC(a0);
-	  int32_t t1_mC = ntc_adc_to_mC(a1);
+	  remote_loop_pingpong();
 
-	  // Apply one-point calibration offset (skip if conversion returned "invalid")
-	  if (t0_mC > -200000 && t0_mC < 200000) t0_mC += CAL_OFFS_CH0_mC;
-	  if (t1_mC > -200000 && t1_mC < 200000) t1_mC += CAL_OFFS_CH1_mC;
-
-
-	  uart_printf("ADC0=%u ADC1=%u  T0=%ld mC  T1=%ld mC\r\n",
-				  (unsigned)a0, (unsigned)a1,
-				  (long)t0_mC, (long)t1_mC);
-	} else {
-	  uart_printf("ADC read error rc=%d\r\n", rc);
-	}
-
-	HAL_Delay(1000);
+//	uint16_t a0 = 0, a1 = 0;
+//	int rc = adc_read_two(&a0, &a1);
+//
+//	if (rc == 0) {
+//	  int32_t t0_mC = ntc_adc_to_mC(a0);
+//	  int32_t t1_mC = ntc_adc_to_mC(a1);
+//
+//	  // Apply one-point calibration offset (skip if conversion returned "invalid")
+//	  if (t0_mC > -200000 && t0_mC < 200000) t0_mC += CAL_OFFS_CH0_mC;
+//	  if (t1_mC > -200000 && t1_mC < 200000) t1_mC += CAL_OFFS_CH1_mC;
+//
+//
+//	  uart_printf("ADC0=%u ADC1=%u  T0=%ld mC  T1=%ld mC\r\n",
+//				  (unsigned)a0, (unsigned)a1,
+//				  (long)t0_mC, (long)t1_mC);
+//	} else {
+//	  uart_printf("ADC read error rc=%d\r\n", rc);
+//	}
+//
+//	HAL_Delay(1000);
 
     /* USER CODE END WHILE */
 
