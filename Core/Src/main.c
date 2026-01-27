@@ -75,6 +75,9 @@ static inline void nrf_csn(int on)
 #define NRF_REG_RF_SETUP      0x06
 #define NRF_REG_STATUS        0x07
 
+#define NRF_CMD_FLUSH_TX 0xE1
+#define NRF_CMD_FLUSH_RX 0xE2
+
 
 /* USER CODE END PD */
 
@@ -223,6 +226,36 @@ static void nrf_init_basic(void)
   nrf_ce(1);      // start listening (PRX mode)
 }
 
+static uint8_t nrf_get_status_cmd(void)
+{
+  uint8_t st;
+  nrf_csn(0);
+  st = nrf_spi_xfer(NRF_CMD_NOP);   // returns STATUS byte
+  nrf_csn(1);
+  return st;
+}
+
+static void nrf_flush_tx(void)
+{
+  nrf_csn(0);
+  nrf_spi_xfer(NRF_CMD_FLUSH_TX);
+  nrf_csn(1);
+}
+
+static void nrf_flush_rx(void)
+{
+  nrf_csn(0);
+  nrf_spi_xfer(NRF_CMD_FLUSH_RX);
+  nrf_csn(1);
+}
+
+static void nrf_clear_irqs(void)
+{
+  // STATUS bits: RX_DR (6), TX_DS (5), MAX_RT (4) are cleared by writing 1
+  nrf_write_reg(NRF_REG_STATUS, 0x70);
+}
+
+
 
 /* USER CODE END 0 */
 
@@ -265,6 +298,10 @@ int main(void)
   nrf_ce(0);
   nrf_csn(1);
   HAL_Delay(10);
+
+  nrf_flush_rx();
+  nrf_flush_tx();
+  nrf_clear_irqs();
 
   uint8_t st = nrf_read_reg(NRF_REG_STATUS);
   uint8_t cfg = nrf_read_reg(NRF_REG_CONFIG);
