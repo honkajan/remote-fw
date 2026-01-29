@@ -82,6 +82,8 @@ static inline void nrf_csn(int on)
 #define NRF_REG_RF_CH          0x05
 #define NRF_REG_RF_SETUP       0x06
 #define NRF_REG_STATUS         0x07
+#define NRF_REG_OBSERVE_TX     0x08
+#define NRF_REG_RPD            0x09
 #define NRF_REG_RX_ADDR_P0     0x0A
 #define NRF_REG_TX_ADDR        0x10
 #define NRF_REG_RX_PW_P0       0x11
@@ -317,9 +319,8 @@ static void nrf_init_link_common(void)
   // Retries: ARD=4 (1500us), ARC=15
   nrf_write_reg(NRF_REG_SETUP_RETR, 0x4F);
 
-  // RF_SETUP: 1Mbps, max power (bits differ by module; this is common baseline)
-  // For plain nRF24L01+: 0x06 = 1Mbps, 0dBm. We’ll start with 0x06 since you already use it.
-  nrf_write_reg(NRF_REG_RF_SETUP, 0x06);
+  // RF_SETUP: 250kbps, max power (0 dBm)
+  nrf_write_reg(NRF_REG_RF_SETUP, 0x26);
 
   // Addresses for pipe0 and TX (must match for auto-ack)
   nrf_write_reg_buf(NRF_REG_RX_ADDR_P0, addr, 5);
@@ -379,6 +380,38 @@ static void remote_loop_pingpong(void)
   }
 }
 
+static void nrf_print_rf_setup(void)
+{
+  uint8_t rf = nrf_read_reg(NRF_REG_RF_SETUP);
+
+  const char *rate = "1Mbps";
+  if (rf & (1u << 5)) rate = "250kbps";
+  else if (rf & (1u << 3)) rate = "2Mbps";
+
+  uint8_t pwr = (rf >> 1) & 0x03;
+  const char *pwr_s = "?";
+  switch (pwr) {
+    case 0: pwr_s = "-18dBm"; break;
+    case 1: pwr_s = "-12dBm"; break;
+    case 2: pwr_s = "-6dBm";  break;
+    case 3: pwr_s = "0dBm";   break;
+  }
+
+  uint8_t retr = nrf_read_reg(NRF_REG_SETUP_RETR);
+  uint8_t ard = (retr >> 4) & 0x0F;
+  uint8_t arc = retr & 0x0F;
+
+  uart_printf(
+    "NRF: ch=%u rate=%s txpwr=%s retr=%uus x%u\r\n",
+    nrf_read_reg(NRF_REG_RF_CH),
+    rate,
+    pwr_s,
+    (ard + 1) * 250,
+    arc
+  );
+}
+
+
 
 
 
@@ -423,6 +456,7 @@ int main(void)
 
 
   nrf_init_link_common();
+  nrf_print_rf_setup();
   uart_printf("Remote NRF STATUS=0x%02X\r\n", nrf_get_status_cmd());
 
   /* USER CODE END 2 */
