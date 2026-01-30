@@ -90,6 +90,11 @@ static inline void nrf_csn(int on)
 #define NRF_REG_FIFO_STATUS    0x17
 
 
+// Command tokens and reply tokens
+#define CMD_PING  0x474E4950u  // 'PING' little-endian if you want 32-bit compare
+#define CMD_GTMP  0x504D5447u  // 'GTMP'
+
+
 
 /* USER CODE END PD */
 
@@ -392,9 +397,73 @@ static void nrf_init_link_common(void)
   nrf_set_rx_mode();
 }
 
+static int nrf_send_reply32(const uint8_t tx[32], uint32_t tmo_ms)
+{
+  nrf_set_tx_mode();
+  nrf_clear_irqs();
+  nrf_flush_tx();
+  nrf_write_payload32(tx);
 
-// Bathroom node logic: RX and reply “PONG”
-static void remote_loop_pingpong(void)
+  nrf_ce(1);
+  HAL_Delay(1);
+  nrf_ce(0);
+
+  const uint32_t start = HAL_GetTick();
+  while ((HAL_GetTick() - start) < tmo_ms) {
+    const uint8_t st = nrf_get_status_cmd();
+
+    if (st & (1u<<5)) { // TX_DS
+      nrf_clear_irqs();
+      nrf_set_rx_mode();
+      return 0;
+    }
+    if (st & (1u<<4)) { // MAX_RT
+      nrf_clear_irqs();
+      nrf_flush_tx();
+      nrf_set_rx_mode();
+      return -1;
+    }
+  }
+
+  // timeout waiting for TX_DS/MAX_RT (should be rare)
+  nrf_set_rx_mode();
+  return -2;
+}
+
+// Verify payload command by comparing bytes
+static int cmd_is(const uint8_t rx[32], const char *s4)
+{
+  return (rx[0]==(uint8_t)s4[0] &&
+          rx[1]==(uint8_t)s4[1] &&
+          rx[2]==(uint8_t)s4[2] &&
+          rx[3]==(uint8_t)s4[3]);
+}
+
+static void put_le16(uint8_t *dst, uint16_t v) { memcpy(dst, &v, sizeof(v)); }
+static void put_le32(uint8_t *dst, uint32_t v) { memcpy(dst, &v, sizeof(v)); }
+
+static void handle_cmd_gtmp(void)
+{
+  uint8_t tx[32] = {0};
+
+  tx[0]='T'; tx[1]='M'; tx[2]='P'; tx[3]='!';
+
+  const uint32_t now = HAL_GetTick();
+  uint32_t age = now - g_tcache.sample_ms;
+  if (age > 65535u) age = 65535u;
+
+  // pack fields (little-endian)
+  put_le32(&tx[4],  (uint32_t)g_tcache.t0_mC);
+  put_le32(&tx[8],  (uint32_t)g_tcache.t1_mC);
+  put_le16(&tx[12], (uint16_t)g_tcache.flags);
+  put_le16(&tx[14], (uint16_t)age);
+  put_le16(&tx[16], (uint16_t)g_tcache.a0);
+  put_le16(&tx[18], (uint16_t)g_tcache.a1);
+
+  (void)nrf_send_reply32(tx, 50);
+}
+
+static void remote_loop_rx_dispatch(void)
 {
   if (!nrf_rx_available()) return;
 
@@ -402,38 +471,25 @@ static void remote_loop_pingpong(void)
   nrf_read_payload32(rx);
   nrf_clear_irqs();
 
-  // Simple signature check
-  if (rx[0]=='P' && rx[1]=='I' && rx[2]=='N' && rx[3]=='G') {
+  if (cmd_is(rx, "PING")) {
     uint8_t tx[32] = {0};
     tx[0]='P'; tx[1]='O'; tx[2]='N'; tx[3]='G';
-
-    // Send reply
-    nrf_set_tx_mode();
-    nrf_clear_irqs();
-    nrf_flush_tx();
-    nrf_write_payload32(tx);
-
-    nrf_ce(1);
-    HAL_Delay(1);
-    nrf_ce(0);
-
-    // Wait a bit for TX complete, then back to RX
-    uint32_t start = HAL_GetTick();
-    while ((HAL_GetTick() - start) < 50) {
-      uint8_t st = nrf_get_status_cmd();
-      if (st & (1u<<5)) { // TX_DS
-        nrf_clear_irqs();
-        break;
-      }
-      if (st & (1u<<4)) { // MAX_RT
-        nrf_clear_irqs();
-        nrf_flush_tx();
-        break;
-      }
-    }
-    nrf_set_rx_mode();
+    (void)nrf_send_reply32(tx, 50);
+    return;
   }
+
+  if (cmd_is(rx, "GTMP")) {
+    handle_cmd_gtmp();
+    return;
+  }
+
+  // Unknown command: optional NACK
+  // uint8_t tx[32] = {0}; tx[0]='E';tx[1]='R';tx[2]='R';tx[3]='!';
+  // (void)nrf_send_reply32(tx, 50);
 }
+
+
+
 
 static void nrf_print_rf_setup(void)
 {
@@ -523,7 +579,7 @@ int main(void)
 	  static uint32_t next_sample_ms = 0;
 	  const uint32_t now = HAL_GetTick();
 
-	  remote_loop_pingpong();   // keep RF responsive
+	  remote_loop_rx_dispatch();   // keep RF responsive
 
 	  if ((int32_t)(now - next_sample_ms) >= 0) {
 	    next_sample_ms = now + 1000u;
