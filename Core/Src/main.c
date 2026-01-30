@@ -121,6 +121,24 @@ static void MX_SPI1_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+
+
+static void uart_printf(const char *fmt, ...)
+{
+  char buf[128];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+
+  if (n < 0) return;
+  if (n > (int)sizeof(buf)) n = sizeof(buf);
+
+  HAL_UART_Transmit(&huart1, (uint8_t*)buf, (uint16_t)strlen(buf), HAL_MAX_DELAY);
+}
+
+
 static int32_t ntc_adc_to_mC(uint16_t adc_counts)
 {
   // Convert ADC counts -> voltage at divider midpoint
@@ -177,18 +195,55 @@ static int adc_read_two(uint16_t *out0, uint16_t *out1)
 }
 
 
-static void uart_printf(const char *fmt, ...)
+typedef struct {
+  int32_t t0_mC;
+  int32_t t1_mC;
+  uint16_t flags;        // bit0=t0 valid, bit1=t1 valid, bit2=adc ok
+  uint32_t sample_ms;    // HAL_GetTick() when sampled
+  uint16_t a0;
+  uint16_t a1;
+} temps_cache_t;
+
+static temps_cache_t g_tcache;
+
+static void temps_update_1hz(void)
 {
-  char buf[128];
-  va_list ap;
-  va_start(ap, fmt);
-  int n = vsnprintf(buf, sizeof(buf), fmt, ap);
-  va_end(ap);
+  uint16_t a0 = 0, a1 = 0;
+  int rc = adc_read_two(&a0, &a1);
 
-  if (n < 0) return;
-  if (n > (int)sizeof(buf)) n = sizeof(buf);
+  g_tcache.a0 = a0;
+  g_tcache.a1 = a1;
+  g_tcache.flags = 0;
 
-  HAL_UART_Transmit(&huart1, (uint8_t*)buf, (uint16_t)strlen(buf), HAL_MAX_DELAY);
+  if (rc == 0) {
+    int32_t t0_mC = ntc_adc_to_mC(a0);
+    int32_t t1_mC = ntc_adc_to_mC(a1);
+
+    // Apply one-point calibration offset (skip if conversion returned "invalid")
+    if (t0_mC > -200000 && t0_mC < 200000) { t0_mC += CAL_OFFS_CH0_mC; g_tcache.flags |= (1u << 0); }
+    if (t1_mC > -200000 && t1_mC < 200000) { t1_mC += CAL_OFFS_CH1_mC; g_tcache.flags |= (1u << 1); }
+
+    g_tcache.flags |= (1u << 2); // adc ok
+    g_tcache.t0_mC = t0_mC;
+    g_tcache.t1_mC = t1_mC;
+    g_tcache.sample_ms = HAL_GetTick();
+
+
+    // Optional UART debug at low rate (or only on request)
+
+	uart_printf("ADC0=%u ADC1=%u  T0=%ld mC  T1=%ld mC\r\n",
+				(unsigned)a0, (unsigned)a1,
+				(long)t0_mC, (long)t1_mC);
+
+
+  } else {
+    // mark invalid, keep last temps if you prefer; here we overwrite with "invalid"
+    g_tcache.t0_mC = 0;
+    g_tcache.t1_mC = 0;
+    g_tcache.sample_ms = HAL_GetTick();
+
+    uart_printf("ADC read error rc=%d\r\n", rc);
+  }
 }
 
 // SPI xfer
@@ -465,29 +520,15 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  static uint32_t next_sample_ms = 0;
+	  const uint32_t now = HAL_GetTick();
 
-	  remote_loop_pingpong();
+	  remote_loop_pingpong();   // keep RF responsive
 
-//	uint16_t a0 = 0, a1 = 0;
-//	int rc = adc_read_two(&a0, &a1);
-//
-//	if (rc == 0) {
-//	  int32_t t0_mC = ntc_adc_to_mC(a0);
-//	  int32_t t1_mC = ntc_adc_to_mC(a1);
-//
-//	  // Apply one-point calibration offset (skip if conversion returned "invalid")
-//	  if (t0_mC > -200000 && t0_mC < 200000) t0_mC += CAL_OFFS_CH0_mC;
-//	  if (t1_mC > -200000 && t1_mC < 200000) t1_mC += CAL_OFFS_CH1_mC;
-//
-//
-//	  uart_printf("ADC0=%u ADC1=%u  T0=%ld mC  T1=%ld mC\r\n",
-//				  (unsigned)a0, (unsigned)a1,
-//				  (long)t0_mC, (long)t1_mC);
-//	} else {
-//	  uart_printf("ADC read error rc=%d\r\n", rc);
-//	}
-//
-//	HAL_Delay(1000);
+	  if ((int32_t)(now - next_sample_ms) >= 0) {
+	    next_sample_ms = now + 1000u;
+	    temps_update_1hz();
+	  }
 
     /* USER CODE END WHILE */
 
