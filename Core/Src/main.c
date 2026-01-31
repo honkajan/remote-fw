@@ -465,27 +465,25 @@ static void handle_cmd_gtmp(void)
 
 static void remote_loop_rx_dispatch(void)
 {
-  if (!nrf_rx_available()) return;
 
-  uint8_t rx[32];
-  nrf_read_payload32(rx);
-  nrf_clear_irqs();
+  while (nrf_rx_available()) {
+	uint8_t rx[32];
+	nrf_read_payload32(rx);
+	nrf_clear_irqs();
 
-  if (cmd_is(rx, "PING")) {
-    uint8_t tx[32] = {0};
-    tx[0]='P'; tx[1]='O'; tx[2]='N'; tx[3]='G';
-    (void)nrf_send_reply32(tx, 50);
-    return;
+	if (rx[0]=='P' && rx[1]=='I' && rx[2]=='N' && rx[3]=='G') {
+		uint8_t tx[32] = {0};
+		tx[0]='P'; tx[1]='O'; tx[2]='N'; tx[3]='G';
+		(void)nrf_send_reply32(tx, 50);
+	} else if (rx[0]=='G' && rx[1]=='T' && rx[2]=='M' && rx[3]=='P') {
+	    handle_cmd_gtmp();
+	} else {
+	  // Unknown command: optional NACK
+	  // uint8_t tx[32] = {0}; tx[0]='E';tx[1]='R';tx[2]='R';tx[3]='!';
+	  // (void)nrf_send_reply32(tx, 50);
+	}
   }
 
-  if (cmd_is(rx, "GTMP")) {
-    handle_cmd_gtmp();
-    return;
-  }
-
-  // Unknown command: optional NACK
-  // uint8_t tx[32] = {0}; tx[0]='E';tx[1]='R';tx[2]='R';tx[3]='!';
-  // (void)nrf_send_reply32(tx, 50);
 }
 
 
