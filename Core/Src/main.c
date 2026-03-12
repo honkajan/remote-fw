@@ -127,7 +127,7 @@ static void MX_SPI1_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-
+static uint32_t g_temps_valid_after_ms = 0;
 
 static void uart_printf(const char *fmt, ...)
 {
@@ -213,6 +213,17 @@ static temps_cache_t g_tcache;
 
 static void temps_update_1hz(void)
 {
+
+
+	const uint32_t now = HAL_GetTick();
+	if ((int32_t)(now - g_temps_valid_after_ms) < 0) {
+		// Still settling; update bookkeeping but don't publish "new" temps
+		g_tcache.sample_ms = now;
+		g_tcache.flags = 0;
+		return;
+	}
+
+
   uint16_t a0 = 0, a1 = 0;
   int rc = adc_read_two(&a0, &a1);
 
@@ -224,13 +235,29 @@ static void temps_update_1hz(void)
     int32_t t0_mC = ntc_adc_to_mC(a0);
     int32_t t1_mC = ntc_adc_to_mC(a1);
 
-    // Apply one-point calibration offset (skip if conversion returned "invalid")
-    if (t0_mC > -200000 && t0_mC < 200000) { t0_mC += CAL_OFFS_CH0_mC; g_tcache.flags |= (1u << 0); }
-    if (t1_mC > -200000 && t1_mC < 200000) { t1_mC += CAL_OFFS_CH1_mC; g_tcache.flags |= (1u << 1); }
+    const int32_t MIN_OK_mC = -200000;
+    const int32_t MAX_OK_mC =  200000;
 
     g_tcache.flags |= (1u << 2); // adc ok
-    g_tcache.t0_mC = t0_mC;
-    g_tcache.t1_mC = t1_mC;
+
+    // CH0
+    if (t0_mC > MIN_OK_mC && t0_mC < MAX_OK_mC) {
+      t0_mC += CAL_OFFS_CH0_mC;
+      g_tcache.t0_mC = t0_mC;
+      g_tcache.flags |= (1u << 0); // t0 valid
+    } else {
+      // invalid -> keep previous g_tcache.t0_mC, leave bit0 cleared
+    }
+
+    // CH1
+    if (t1_mC > MIN_OK_mC && t1_mC < MAX_OK_mC) {
+      t1_mC += CAL_OFFS_CH1_mC;
+      g_tcache.t1_mC = t1_mC;
+      g_tcache.flags |= (1u << 1); // t1 valid
+    } else {
+      // invalid -> keep previous g_tcache.t1_mC, leave bit1 cleared
+    }
+
     g_tcache.sample_ms = HAL_GetTick();
 
 
@@ -242,7 +269,6 @@ static void temps_update_1hz(void)
 
 
   } else {
-    // mark invalid, keep last temps if you prefer; here we overwrite with "invalid"
     g_tcache.t0_mC = 0;
     g_tcache.t1_mC = 0;
     g_tcache.sample_ms = HAL_GetTick();
@@ -567,6 +593,8 @@ int main(void)
   nrf_init_link_common();
   nrf_print_rf_setup();
   uart_printf("Remote NRF STATUS=0x%02X\r\n", nrf_get_status_cmd());
+
+  g_temps_valid_after_ms = HAL_GetTick() + 3000u; // 3 seconds settle time
 
   /* USER CODE END 2 */
 
