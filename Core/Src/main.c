@@ -50,6 +50,8 @@
 #define CAL_OFFS_CH0_mC  (460)   // +0.46 °C
 #define CAL_OFFS_CH1_mC  (210)   // +0.21 °C
 
+#define TEMP_ADC_SETTLE_MS 20000u
+
 // Pins
 #define NRF_CE_PORT   GPIOB
 #define NRF_CE_PIN    GPIO_PIN_0
@@ -594,7 +596,7 @@ int main(void)
   nrf_print_rf_setup();
   uart_printf("Remote NRF STATUS=0x%02X\r\n", nrf_get_status_cmd());
 
-  g_temps_valid_after_ms = HAL_GetTick() + 3000u; // 3 seconds settle time
+  g_temps_valid_after_ms = HAL_GetTick() + TEMP_ADC_SETTLE_MS;
 
   /* USER CODE END 2 */
 
