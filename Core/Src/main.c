@@ -50,7 +50,7 @@
 #define CAL_OFFS_CH0_mC  (460)   // +0.46 °C
 #define CAL_OFFS_CH1_mC  (210)   // +0.21 °C
 
-#define TEMP_ADC_SETTLE_MS 20000u
+#define TEMP_ADC_SETTLE_MS 3000u
 
 // Pins
 #define NRF_CE_PORT   GPIOB
