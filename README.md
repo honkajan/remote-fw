@@ -21,16 +21,16 @@ Typical flow:
 
 ## Repository context
 
-This repository contains the actual STM32CubeIDE firmware project for the remote node.
+This repository contains the **actual STM32CubeIDE firmware project** for the remote node.
 
 The broader system documentation is maintained separately in:
 
-- **stm32-nrf24-temperature-logger**: `https://github.com/honkajan/stm32-nrf24-temperature-logger`
+- **stm32-nrf24-temperature-logger**: [System-level documentation](https://github.com/honkajan/stm32-nrf24-temperature-logger)
 
 Related repositories:
 
-- **uartctl** (host-side Python CLI tool): `https://github.com/honkajan/uartctl`
-- **gateway-fw** (gateway firmware): `https://github.com/honkajan/gateway-fw`
+- **uartctl** (host-side Python CLI tool): [https://github.com/honkajan/uartctl](https://github.com/honkajan/uartctl)
+- **gateway-fw** (gateway firmware): [https://github.com/honkajan/gateway-fw](https://github.com/honkajan/gateway-fw)
 
 ## Project layout
 
