@@ -146,28 +146,41 @@ static void uart_printf(const char *fmt, ...)
 }
 
 
+#define NTC_ADC_CLAMP_LOW_MAX    10u
+#define NTC_ADC_CLAMP_HIGH_MIN   (ADC_MAX_COUNTS - 10u)
+
+/* Sentinel values for fault conditions */
+#define TEMP_INVALID_COLD_mC   (-273150)
+#define TEMP_INVALID_HOT_mC    (999999)
+
 static int32_t ntc_adc_to_mC(uint16_t adc_counts)
 {
-  // Convert ADC counts -> voltage at divider midpoint
-  float v = ( (float)adc_counts / ADC_MAX_COUNTS ) * VREF_VOLTS;
+  /* Reject near-rail ADC values (open/short/fault conditions) */
+  if (adc_counts <= NTC_ADC_CLAMP_LOW_MAX) {
+    return TEMP_INVALID_COLD_mC;
+  }
 
-  // Guard against impossible / saturating values
-  if (v <= 0.001f)  return -273150;  // effectively "invalid very cold"
-  if (v >= (VREF_VOLTS - 0.001f)) return 999999; // effectively "invalid very hot"
+  if (adc_counts >= NTC_ADC_CLAMP_HIGH_MIN) {
+    return TEMP_INVALID_HOT_mC;
+  }
 
-  // Divider: V = Vref * (Rntc / (Rfix + Rntc))
-  // => Rntc = Rfix * V / (Vref - V)
-  float r_ntc = RFIX_OHMS * v / (VREF_VOLTS - v);
+  /* Convert ADC counts -> voltage */
+  const float v = ((float)adc_counts / ADC_MAX_COUNTS) * VREF_VOLTS;
 
-  // Beta formula:
-  // 1/T = 1/T0 + (1/B) * ln(R/R0)
-  float invT = (1.0f / T0_KELVIN) + (1.0f / BETA_K) * logf(r_ntc / R0_OHMS);
-  float tempK = 1.0f / invT;
-  float tempC = tempK - 273.15f;
+  /* Divider: V = Vref * (Rntc / (Rfix + Rntc))
+   * => Rntc = Rfix * V / (Vref - V)
+   */
+  const float r_ntc = RFIX_OHMS * v / (VREF_VOLTS - v);
 
-  // milli-Celsius
-  int32_t mC = (int32_t)lroundf(tempC * 1000.0f);
-  return mC;
+  /* Beta equation */
+  const float invT =
+      (1.0f / T0_KELVIN) +
+      (1.0f / BETA_K) * logf(r_ntc / R0_OHMS);
+
+  const float tempK = 1.0f / invT;
+  const float tempC = tempK - 273.15f;
+
+  return (int32_t)lroundf(tempC * 1000.0f);
 }
 
 static int adc_read_one(ADC_HandleTypeDef *hadc, uint32_t channel, uint16_t *out)
@@ -213,18 +226,19 @@ typedef struct {
 
 static temps_cache_t g_tcache;
 
+#define TEMP_FLAG_T0_VALID  (1u << 0)
+#define TEMP_FLAG_T1_VALID  (1u << 1)
+#define TEMP_FLAG_ADC_OK    (1u << 2)
+
 static void temps_update_1hz(void)
 {
-
-
-	const uint32_t now = HAL_GetTick();
-	if ((int32_t)(now - g_temps_valid_after_ms) < 0) {
-		// Still settling; update bookkeeping but don't publish "new" temps
-		g_tcache.sample_ms = now;
-		g_tcache.flags = 0;
-		return;
-	}
-
+  const uint32_t now = HAL_GetTick();
+  if ((int32_t)(now - g_temps_valid_after_ms) < 0) {
+    /* Still settling; update bookkeeping but don't publish "new" temps */
+    g_tcache.sample_ms = now;
+    g_tcache.flags = 0;
+    return;
+  }
 
   uint16_t a0 = 0, a1 = 0;
   int rc = adc_read_two(&a0, &a1);
@@ -240,40 +254,35 @@ static void temps_update_1hz(void)
     const int32_t MIN_OK_mC = -200000;
     const int32_t MAX_OK_mC =  200000;
 
-    g_tcache.flags |= (1u << 2); // adc ok
+    g_tcache.flags |= TEMP_FLAG_ADC_OK;
 
-    // CH0
+    /* CH0 */
     if (t0_mC > MIN_OK_mC && t0_mC < MAX_OK_mC) {
       t0_mC += CAL_OFFS_CH0_mC;
       g_tcache.t0_mC = t0_mC;
-      g_tcache.flags |= (1u << 0); // t0 valid
+      g_tcache.flags |= TEMP_FLAG_T0_VALID;
     } else {
-      // invalid -> keep previous g_tcache.t0_mC, leave bit0 cleared
+      /* invalid -> keep previous g_tcache.t0_mC, leave bit cleared */
     }
 
-    // CH1
+    /* CH1 */
     if (t1_mC > MIN_OK_mC && t1_mC < MAX_OK_mC) {
       t1_mC += CAL_OFFS_CH1_mC;
       g_tcache.t1_mC = t1_mC;
-      g_tcache.flags |= (1u << 1); // t1 valid
+      g_tcache.flags |= TEMP_FLAG_T1_VALID;
     } else {
-      // invalid -> keep previous g_tcache.t1_mC, leave bit1 cleared
+      /* invalid -> keep previous g_tcache.t1_mC, leave bit cleared */
     }
 
-    g_tcache.sample_ms = HAL_GetTick();
+    g_tcache.sample_ms = now;
 
-
-    // Optional UART debug at low rate (or only on request)
-
-	uart_printf("ADC0=%u ADC1=%u  T0=%ld mC  T1=%ld mC\r\n",
-				(unsigned)a0, (unsigned)a1,
-				(long)t0_mC, (long)t1_mC);
-
-
+    uart_printf("ADC0=%u ADC1=%u  T0=%ld mC  T1=%ld mC\r\n",
+                (unsigned)a0, (unsigned)a1,
+                (long)t0_mC, (long)t1_mC);
   } else {
     g_tcache.t0_mC = 0;
     g_tcache.t1_mC = 0;
-    g_tcache.sample_ms = HAL_GetTick();
+    g_tcache.sample_ms = now;
 
     uart_printf("ADC read error rc=%d\r\n", rc);
   }
