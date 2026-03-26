@@ -150,29 +150,32 @@ static void uart_printf(const char *fmt, ...)
 #define NTC_ADC_CLAMP_HIGH_MIN   (ADC_MAX_COUNTS - 10u)
 
 /* Sentinel values for fault conditions */
-#define TEMP_INVALID_COLD_mC   (-273150)
-#define TEMP_INVALID_HOT_mC    (999999)
+#define TEMP_FAULT_HOT_mC    (300000)    /* +300.000 °C */
+#define TEMP_FAULT_COLD_mC   (-273150)   /* -273.150 °C (absolute zero) */
 
 static int32_t ntc_adc_to_mC(uint16_t adc_counts)
 {
   /* Reject near-rail ADC values (open/short/fault conditions) */
   if (adc_counts <= NTC_ADC_CLAMP_LOW_MAX) {
-    return TEMP_INVALID_COLD_mC;
+    return TEMP_FAULT_HOT_mC;
   }
 
   if (adc_counts >= NTC_ADC_CLAMP_HIGH_MIN) {
-    return TEMP_INVALID_HOT_mC;
+    return TEMP_FAULT_COLD_mC;
   }
 
-  /* Convert ADC counts -> voltage */
+  /* Convert ADC counts -> divider midpoint voltage */
   const float v = ((float)adc_counts / ADC_MAX_COUNTS) * VREF_VOLTS;
 
-  /* Divider: V = Vref * (Rntc / (Rfix + Rntc))
+  /* Divider:
+   *   V = Vref * (Rntc / (Rfix + Rntc))
    * => Rntc = Rfix * V / (Vref - V)
    */
   const float r_ntc = RFIX_OHMS * v / (VREF_VOLTS - v);
 
-  /* Beta equation */
+  /* Beta equation:
+   *   1/T = 1/T0 + (1/B) * ln(R/R0)
+   */
   const float invT =
       (1.0f / T0_KELVIN) +
       (1.0f / BETA_K) * logf(r_ntc / R0_OHMS);
